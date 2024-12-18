@@ -4,6 +4,90 @@ use std::collections::HashSet;
 
 const TILE_SIZE: f32 = 20.0;
 
+// Add this new enum to represent different tile types
+#[derive(Clone, PartialEq)]
+enum Tile {
+    Wall,
+    Floor,
+    StairsUp,
+    StairsDown,
+}
+
+impl Tile {
+    fn to_char(&self) -> char {
+        match self {
+            Tile::Wall => '#',
+            Tile::Floor => '.',
+            Tile::StairsUp => '<',
+            Tile::StairsDown => '>',
+        }
+    }
+}
+
+struct MapManager {
+    maps: Vec<Map>,
+    current_level: i32,
+    config: GameConfig,
+}
+
+impl MapManager {
+    fn new(config: GameConfig) -> Self {
+        let initial_map = Map::new(config.map_width, config.map_height, 0);
+        Self {
+            maps: vec![initial_map],
+            current_level: 0,
+            config,
+        }
+    }
+
+    fn current_map(&self) -> &Map {
+        &self.maps[self.current_level as usize]
+    }
+
+    fn current_map_mut(&mut self) -> &mut Map {
+        &mut self.maps[self.current_level as usize]
+    }
+
+    fn change_level(&mut self, new_level: i32) -> Option<(f32, f32)> {
+        // Ensure the level exists or create it
+        if new_level >= 0 && (new_level as usize) >= self.maps.len() {
+            // Generate new level
+            let new_map = Map::new(self.config.map_width, self.config.map_height, new_level);
+            self.maps.push(new_map);
+        }
+
+        if new_level >= 0 && (new_level as usize) < self.maps.len() {
+            self.current_level = new_level;
+
+            // Return the appropriate stairs position for player placement
+            if new_level > self.current_level {
+                // Coming from stairs up - place at down stairs
+                self.current_map().up_stairs.map(|(x, y)| (x as f32, y as f32))
+            } else {
+                // Coming from stairs down - place at up stairs
+                self.current_map().down_stairs.map(|(x, y)| (x as f32, y as f32))
+            }
+        } else {
+            None
+        }
+    }
+
+    fn check_for_stairs(&self, x: f32, y: f32) -> Option<i32> {
+        let map = self.current_map();
+        let idx = y as usize * map.width + x as usize;
+
+        if idx < map.tiles.len() {
+            match map.tiles[idx] {
+                Tile::StairsDown => Some(self.current_level + 1),
+                Tile::StairsUp => Some(self.current_level - 1),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
 // Define item types
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemType {
@@ -330,20 +414,52 @@ impl Camera {
 struct Map {
     width: usize,
     height: usize,
-    tiles: Vec<char>,
+    tiles: Vec<Tile>,
     rooms: Vec<Room>,
+    level: i32,  // Add current level number
+    up_stairs: Option<(usize, usize)>,    // Position of stairs up
+    down_stairs: Option<(usize, usize)>,  // Position of stairs down
 }
 
 impl Map {
-    fn new(width: usize, height: usize) -> Self {
+    fn new(width: usize, height: usize, level: i32) -> Self {
         let mut map = Map {
             width,
             height,
-            tiles: vec!['#'; width * height],
+            tiles: vec![Tile::Wall; width * height],
             rooms: Vec::new(),
+            level,
+            up_stairs: None,
+            down_stairs: None,
         };
         map.generate_dungeon();
+        map.place_stairs();
         map
+    }
+
+    // Add this new method to place stairs
+    fn place_stairs(&mut self) {
+        let mut rng = thread_rng();
+
+        // Always place downstairs except on the last level (you can adjust this logic)
+        if self.level < 10 {  // Assuming max 10 levels
+            if let Some(room) = self.rooms.choose(&mut rng) {
+                let (x, y) = room.random_position(&mut rng);
+                let idx = y as usize * self.width + x as usize;
+                self.tiles[idx] = Tile::StairsDown;
+                self.down_stairs = Some((x as usize, y as usize));
+            }
+        }
+
+        // Always place upstairs except on the first level
+        if self.level > 0 {
+            if let Some(room) = self.rooms.choose(&mut rng) {
+                let (x, y) = room.random_position(&mut rng);
+                let idx = y as usize * self.width + x as usize;
+                self.tiles[idx] = Tile::StairsUp;
+                self.up_stairs = Some((x as usize, y as usize));
+            }
+        }
     }
 
     fn generate_dungeon(&mut self) {
@@ -351,6 +467,9 @@ impl Map {
         let max_rooms = 15;
         let min_room_size = 5;
         let max_room_size = 10;
+
+        // Initialize all tiles as walls
+        self.tiles = vec![Tile::Wall; self.width * self.height];
 
         // Generate rooms
         for _ in 0..max_rooms {
@@ -361,7 +480,6 @@ impl Map {
 
             let new_room = Room::new(x, y, w, h);
 
-            // Check if room intersects with existing rooms
             let mut intersects = false;
             for other_room in &self.rooms {
                 if new_room.intersects(other_room) {
@@ -374,11 +492,9 @@ impl Map {
                 self.create_room(&new_room);
 
                 if !self.rooms.is_empty() {
-                    // Connect to previous room
                     let (new_x, new_y) = new_room.center();
                     let (prev_x, prev_y) = self.rooms[self.rooms.len() - 1].center();
 
-                    // Randomly choose horizontal or vertical corridor first
                     if rng.gen_bool(0.5) {
                         self.create_horizontal_tunnel(prev_x, new_x, prev_y);
                         self.create_vertical_tunnel(prev_y, new_y, new_x);
@@ -391,8 +507,6 @@ impl Map {
                 self.rooms.push(new_room);
             }
         }
-
-        // No need to store rooms separately as they're now part of the struct
     }
 
     fn create_room(&mut self, room: &Room) {
@@ -400,7 +514,7 @@ impl Map {
             for x in room.x..room.x + room.width {
                 let idx = y as usize * self.width + x as usize;
                 if idx < self.tiles.len() {
-                    self.tiles[idx] = '.';
+                    self.tiles[idx] = Tile::Floor;
                 }
             }
         }
@@ -410,7 +524,7 @@ impl Map {
         for x in x1.min(x2)..=x1.max(x2) {
             let idx = y as usize * self.width + x as usize;
             if idx < self.tiles.len() {
-                self.tiles[idx] = '.';
+                self.tiles[idx] = Tile::Floor;
             }
         }
     }
@@ -419,7 +533,7 @@ impl Map {
         for y in y1.min(y2)..=y1.max(y2) {
             let idx = y as usize * self.width + x as usize;
             if idx < self.tiles.len() {
-                self.tiles[idx] = '.';
+                self.tiles[idx] = Tile::Floor;
             }
         }
     }
@@ -429,7 +543,17 @@ impl Map {
             return false;
         }
         let idx = y as usize * self.width + x as usize;
-        self.tiles[idx] == '.'
+        match self.tiles[idx] {
+            Tile::Floor | Tile::StairsUp | Tile::StairsDown => true,
+            Tile::Wall => false,
+        }
+    }
+
+    fn is_wall(&self, x: usize, y: usize) -> bool {
+        if x >= self.width || y >= self.height {
+            return true;
+        }
+        self.tiles[y * self.width + x] == Tile::Wall
     }
 
     fn place_monsters(&self, rooms: &[Room]) -> (Option<(f32, f32)>, Vec<(f32, f32)>) {
@@ -480,30 +604,32 @@ impl Map {
         (player_spawn, monster_positions)
     }
 
-    fn is_wall(&self, x: usize, y: usize) -> bool {
-        if x >= self.width || y >= self.height {
-            return true;
-        }
-        self.tiles[y * self.width + x] == '#'
-    }
-
+    // Update the draw method to use different colors for different tiles
     fn draw(&self, camera: &Camera) {
         let start_x = camera.x.floor() as usize;
         let start_y = camera.y.floor() as usize;
         let end_x = (camera.x + camera.viewport_width as f32).ceil() as usize;
         let end_y = (camera.y + camera.viewport_height as f32).ceil() as usize;
 
-        // Only draw tiles that are visible in the viewport
         for y in start_y..end_y.min(self.height) {
             for x in start_x..end_x.min(self.width) {
-                let tile = self.tiles[y * self.width + x];
+                let tile = &self.tiles[y * self.width + x];
                 let (screen_x, screen_y) = camera.world_to_screen(x as f32, y as f32);
+
+                // Choose color based on tile type
+                let (char, color) = match tile {
+                    Tile::Wall => ('#', DARKGRAY),
+                    Tile::Floor => ('.', GRAY),
+                    Tile::StairsUp => ('<', YELLOW),
+                    Tile::StairsDown => ('>', YELLOW),
+                };
+
                 draw_text(
-                    &tile.to_string(),
+                    &char.to_string(),
                     screen_x,
-                    screen_y + TILE_SIZE, // Add TILE_SIZE to account for text height
+                    screen_y + TILE_SIZE,
                     TILE_SIZE,
-                    WHITE,
+                    color,
                 );
             }
         }
@@ -561,25 +687,105 @@ struct GameState {
     combat_log: Vec<String>,
     player_turn: bool,
     ground_items: Vec<(f32, f32, Item)>,
-    inventory_open: bool,  // Add this line
+    inventory_open: bool,
+    map_manager: MapManager,
 }
 
 impl GameState {
-    fn new() -> Self {
-        let mut monsters = Vec::new();
+    fn new(config: GameConfig) -> Self {
+        let map_manager = MapManager::new(config);
 
-        // Add some initial monsters
-        for i in 0..5 {
-            monsters.push(Entity::new_monster(10.0 + i as f32 * 2.0, 10.0));
-        }
-
-        Self {
+        // Create the base game state first
+        let mut game_state = Self {
             player: Entity::new_player(),
-            monsters,
+            monsters: Vec::new(),
             combat_log: Vec::new(),
             player_turn: true,
             ground_items: Vec::new(),
             inventory_open: false,
+            map_manager,
+        };
+
+        // Initialize first level separately
+        game_state.initialize_current_level();
+
+        game_state
+    }
+
+    fn initialize_current_level(&mut self) {
+        // Get the current map's rooms to spawn entities
+        let rooms = self.map_manager.current_map().rooms.clone();
+
+        // Spawn entities using the rooms
+        let (player_spawn, monster_positions) = self.map_manager.current_map().place_monsters(&rooms);
+
+        // Set player position
+        if let Some((x, y)) = player_spawn {
+            self.player.x = x;
+            self.player.y = y;
+        } else {
+            // Fallback: find any walkable position
+            let map = self.map_manager.current_map();
+            'outer: for y in 0..map.height as i32 {
+                for x in 0..map.width as i32 {
+                    if map.is_walkable(x, y) {
+                        self.player.x = x as f32;
+                        self.player.y = y as f32;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        // Spawn monsters
+        self.monsters.clear();
+        let map = self.map_manager.current_map();
+        for (x, y) in monster_positions {
+            if map.is_walkable(x as i32, y as i32) {
+                self.monsters.push(Entity::new_monster(x, y));
+            }
+        }
+
+        // Spawn items
+        self.spawn_items_for_current_level();
+    }
+
+    fn spawn_items_for_current_level(&mut self) {
+        let mut rng = thread_rng();
+        self.ground_items.clear();
+
+        // Clone the rooms to avoid borrowing issues
+        let rooms = self.map_manager.current_map().rooms.clone();
+
+        for room in &rooms {
+            // 60% chance to spawn an item in each room
+            if rng.gen_bool(0.6) {
+                let (x, y) = room.random_position(&mut rng);
+                let item = match rng.gen_range(0..4) {
+                    0 => Item::new_sword(),
+                    1 => Item::new_armor(),
+                    2 => Item::new_health_potion(),
+                    _ => Item::new_lightning_scroll(),
+                };
+                self.ground_items.push((x as f32, y as f32, item));
+            }
+        }
+    }
+
+    fn handle_level_transition(&mut self) {
+        let player_pos = (self.player.x, self.player.y);
+        if let Some(new_level) = self.map_manager.check_for_stairs(player_pos.0, player_pos.1) {
+            if let Some((new_x, new_y)) = self.map_manager.change_level(new_level) {
+                // Update player position
+                self.player.x = new_x;
+                self.player.y = new_y;
+
+                // Initialize the new level
+                self.initialize_current_level();
+
+                // Add message to combat log
+                self.add_log_message(format!("Moved to level {}", new_level + 1));
+            }
         }
     }
 
@@ -733,7 +939,7 @@ impl GameState {
         }
     }
 
-    fn process_monster_turns(&mut self, map: &Map, current_time: f32) {
+    fn process_monster_turns(&mut self, current_time: f32) {
         let player_pos = (self.player.x, self.player.y);
         let monster_positions: Vec<(f32, f32)> = self.monsters.iter()
             .filter(|m| m.is_alive())
@@ -768,11 +974,13 @@ impl GameState {
                 }
             }
 
-            // Check for collision with walls or other monsters
-            if !map.is_wall(new_x as usize, new_y as usize) {
+            // Check for collision with walls
+            let is_walkable = self.map_manager.current_map().is_walkable(new_x as i32, new_y as i32);
+
+            if is_walkable {
                 let mut can_move = true;
 
-                // Check collision with other monsters using our pre-collected positions
+                // Check collision with other monsters
                 for (pos_x, pos_y) in &monster_positions {
                     if *pos_x == new_x && *pos_y == new_y && (*pos_x != monster.x || *pos_y != monster.y) {
                         can_move = false;
@@ -866,10 +1074,7 @@ impl Default for GameConfig {
 #[macroquad::main("Roguelike")]
 async fn main() {
     let config = GameConfig::default();
-    let map = Map::new(config.map_width, config.map_height);
-    let mut game_state = GameState::new();
-    game_state.spawn_entities(&map);
-    game_state.spawn_items(&map);
+    let mut game_state = GameState::new(config);
 
     let viewport_width = (screen_width() / TILE_SIZE).floor() as usize;
     let viewport_height = (screen_height() / TILE_SIZE).floor() as usize;
@@ -878,7 +1083,6 @@ async fn main() {
     loop {
         let current_time = get_time() as f32;
 
-        // In your main game loop where you handle player movement:
         if game_state.player.is_alive() {
             let mut new_x = game_state.player.x;
             let mut new_y = game_state.player.y;
@@ -914,30 +1118,38 @@ async fn main() {
                     }
                 }
 
-                // Move if no combat and no wall
-                if !combat_occurred && !map.is_wall(new_x as usize, new_y as usize) {
+                // Move if no combat and the tile is walkable
+                if !combat_occurred && game_state.map_manager.current_map().is_walkable(new_x as i32, new_y as i32) {
                     game_state.player.x = new_x;
                     game_state.player.y = new_y;
 
                     // Check for items at the new position
                     game_state.check_and_pickup_items();
+
+                    // Check for level transition
+                    game_state.handle_level_transition();
                 }
             }
         }
 
-        game_state.process_monster_turns(&map, current_time);
+        game_state.process_monster_turns(current_time);
 
         // Remove dead monsters
         game_state.monsters.retain(|m| m.is_alive());
 
         // Update camera to follow player
-        camera.follow(game_state.player.x, game_state.player.y, config.map_width, config.map_height);
+        camera.follow(
+            game_state.player.x,
+            game_state.player.y,
+            game_state.map_manager.current_map().width,
+            game_state.map_manager.current_map().height
+        );
 
         // Clear screen
         clear_background(BLACK);
 
-        // Draw the map
-        map.draw(&camera);
+        // Draw the current map
+        game_state.map_manager.current_map().draw(&camera);
 
         // Draw monsters
         for monster in &game_state.monsters {
@@ -982,11 +1194,12 @@ async fn main() {
         // Draw UI
         draw_rectangle(0.0, 0.0, screen_width(), 30.0, Color::new(0.0, 0.0, 0.0, 0.8));
         draw_text(
-            &format!("HP: {}/{} ATK: {} DEF: {}",
+            &format!("HP: {}/{} ATK: {} DEF: {} Level: {}",
                      game_state.player.stats.hp,
                      game_state.player.stats.max_hp,
                      game_state.player.stats.attack,
-                     game_state.player.stats.defense
+                     game_state.player.stats.defense,
+                     game_state.map_manager.current_level + 1  // Add current level to UI
             ),
             10.0,
             20.0,
