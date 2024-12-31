@@ -290,7 +290,7 @@ impl Entity {
                 max_hp: 30,
                 attack: 5,
                 defense: 2,
-                speed: 5.0,
+                speed: 10.0,
                 last_move: 0.0,
             },
             is_player: true,
@@ -1351,29 +1351,30 @@ async fn main() {
     loop {
         let current_time = get_time() as f32;
 
-        if game_state.player.is_alive() {
+        if game_state.player.is_alive() && game_state.player.can_move(current_time)  {
             let mut new_x = game_state.player.x;
             let mut new_y = game_state.player.y;
             let mut moved = false;
 
-            if is_key_pressed(KeyCode::W) {
+            if is_key_pressed(KeyCode::W) || is_key_down(KeyCode::W)  {
                 new_y -= 1.0;
                 moved = true;
             }
-            if is_key_pressed(KeyCode::S) {
+            if is_key_pressed(KeyCode::S) || is_key_down(KeyCode::S) {
                 new_y += 1.0;
                 moved = true;
             }
-            if is_key_pressed(KeyCode::A) {
+            if is_key_pressed(KeyCode::A) || is_key_down(KeyCode::A) {
                 new_x -= 1.0;
                 moved = true;
             }
-            if is_key_pressed(KeyCode::D) {
+            if is_key_pressed(KeyCode::D) || is_key_down(KeyCode::D) {
                 new_x += 1.0;
                 moved = true;
             }
 
             if moved {
+                game_state.player.update_last_move(current_time);
                 let mut combat_occurred = false;
 
                 // Check for combat
