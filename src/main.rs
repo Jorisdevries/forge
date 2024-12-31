@@ -32,10 +32,12 @@ struct MapManager {
 
 impl MapManager {
     fn new(config: GameConfig) -> Self {
-        // Generate first level
         let initial_map = Map::new(config.map_width, config.map_height, 0, None);
+        let mut maps = Vec::new();
+        maps.push(initial_map);
+
         Self {
-            maps: vec![initial_map],
+            maps,
             current_level: 0,
             config,
         }
@@ -55,46 +57,24 @@ impl MapManager {
         }
 
         let going_down = new_level > self.current_level;
+        self.current_level = new_level;
 
-        // Generate new level if needed
+        // Generate new map if it doesn't exist
         if new_level as usize >= self.maps.len() {
-            let stairs_pos = if going_down {
-                self.current_map().down_stairs
+            let stairs_up_pos = if going_down {
+                Some(self.maps.last().unwrap().down_stairs.unwrap())
             } else {
-                self.current_map().up_stairs
+                None
             };
-
-            let new_map = Map::new(
-                self.config.map_width,
-                self.config.map_height,
-                new_level,
-                stairs_pos,
-            );
+            let new_map = Map::new(self.config.map_width, self.config.map_height, new_level, stairs_up_pos);
             self.maps.push(new_map);
         }
 
-        self.current_level = new_level;
-
-        // Update player position based on direction
+        // Return player spawn position
         if going_down {
-            self.current_map().up_stairs.map(|(x, y)| (x as f32, y as f32))
+            self.maps[new_level as usize].up_stairs.map(|(x, y)| (x as f32, y as f32))
         } else {
-            self.current_map().down_stairs.map(|(x, y)| (x as f32, y as f32))
-        }
-    }
-
-    fn check_for_stairs(&self, x: f32, y: f32) -> Option<i32> {
-        let map = self.current_map();
-        let idx = y as usize * map.width + x as usize;
-
-        if idx < map.tiles.len() {
-            match map.tiles[idx] {
-                Tile::StairsDown => Some(self.current_level + 1),
-                Tile::StairsUp => Some(self.current_level - 1),
-                _ => None,
-            }
-        } else {
-            None
+            self.maps[new_level as usize].down_stairs.map(|(x, y)| (x as f32, y as f32))
         }
     }
 }
@@ -425,11 +405,11 @@ impl Camera {
 struct Map {
     width: usize,
     height: usize,
-    tiles: Vec<Tile>,
-    rooms: Vec<Room>,
-    level: i32,  // Add current level number
-    up_stairs: Option<(usize, usize)>,    // Position of stairs up
-    down_stairs: Option<(usize, usize)>,  // Position of stairs down
+    tiles: Vec<Vec<Tile>>,
+    rooms: Vec<Vec<Room>>,
+    level: i32,
+    up_stairs: Option<(usize, usize)>,
+    down_stairs: Option<(usize, usize)>,
 }
 
 impl Map {
@@ -437,29 +417,30 @@ impl Map {
         let mut map = Map {
             width,
             height,
-            tiles: vec![Tile::Wall; width * height],
+            tiles: vec![vec![Tile::Wall; width]; height],
             rooms: Vec::new(),
             level,
             up_stairs: stairs_up_pos,
             down_stairs: None,
         };
 
-        map.generate_dungeon();
-        map.place_stairs();
+        // Use level as seed for consistent but different layouts per level
+        let seed = level as u64;
+        let rng = StdRng::seed_from_u64(seed);
+        map.generate_dungeon_with_stairs_seeded(rng);
         map
     }
 
-    fn generate_dungeon_with_stairs(&mut self) {
-        let mut rng = thread_rng();
+    fn generate_dungeon_with_stairs_seeded(&mut self, mut rng: impl Rng) {
+        // Existing generate_dungeon_with_stairs logic but using provided rng
         let max_rooms = 15;
         let min_room_size = 5;
         let max_room_size = 10;
 
-        // Clear existing tiles and rooms
-        self.tiles = vec![Tile::Wall; self.width * self.height];
+        let mut temp_rooms = Vec::new();
+        self.tiles = vec![vec![Tile::Wall; self.width]; self.height];
         self.rooms.clear();
 
-        // Generate rooms and corridors
         for _ in 0..max_rooms {
             let w = rng.gen_range(min_room_size..max_room_size);
             let h = rng.gen_range(min_room_size..max_room_size);
@@ -468,10 +449,10 @@ impl Map {
 
             let new_room = Room::new(x, y, w, h);
 
-            if !self.rooms.iter().any(|r| r.intersects(&new_room)) {
+            if !temp_rooms.iter().any(|r: &Room| r.intersects(&new_room)) {
                 self.create_room(&new_room);
 
-                if let Some(prev_room) = self.rooms.last() {
+                if let Some(prev_room) = temp_rooms.last() {
                     let (prev_x, prev_y) = prev_room.center();
                     let (new_x, new_y) = new_room.center();
 
@@ -484,55 +465,174 @@ impl Map {
                     }
                 }
 
-                self.rooms.push(new_room);
+                temp_rooms.push(new_room);
             }
         }
+
+        self.rooms = vec![temp_rooms];
 
         // Place stairs
         if self.level > 0 {
             if let Some((x, y)) = self.up_stairs {
-                self.tiles[y * self.width + x] = Tile::StairsUp;
+                self.tiles[y][x] = Tile::StairsUp;
+            } else if let Some(first_row) = self.rooms.first() {
+                if let Some(first_room) = first_row.first() {
+                    let (x, y) = first_room.center();
+                    let (x, y) = (x as usize, y as usize);
+                    self.tiles[y][x] = Tile::StairsUp;
+                    self.up_stairs = Some((x, y));
+                }
             }
         }
 
         if self.level < 9 {
-            let (x, y) = self.rooms.last().unwrap().center();
-            self.tiles[y as usize * self.width + x as usize] = Tile::StairsDown;
-            self.down_stairs = Some((x as usize, y as usize));
+            if let Some(last_row) = self.rooms.last() {
+                if let Some(last_room) = last_row.last() {
+                    let (x, y) = last_room.center();
+                    let (x, y) = (x as usize, y as usize);
+                    self.tiles[y][x] = Tile::StairsDown;
+                    self.down_stairs = Some((x, y));
+                }
+            }
+        }
+    }
+
+    fn check_for_stairs(&self, x: f32, y: f32) -> Option<i32> {
+        let x = x as usize;
+        let y = y as usize;
+
+        if y >= self.height || x >= self.width {
+            return None;
+        }
+
+        match self.tiles[y][x] {
+            Tile::StairsDown => Some(self.level + 1),
+            Tile::StairsUp => Some(self.level - 1),
+            _ => None,
+        }
+    }
+
+    fn organize_rooms(&mut self, temp_rooms: Vec<Room>) {
+        let mut organized_rooms: Vec<Vec<Room>> = Vec::new();
+        let room_height = 10;
+
+        let mut sorted_rooms = temp_rooms;
+        sorted_rooms.sort_by_key(|room| room.y);
+
+        if sorted_rooms.is_empty() {
+            self.rooms = Vec::new();
+            return;
+        }
+
+        let mut current_row: Vec<Room> = Vec::new();
+        let mut current_y = sorted_rooms[0].y;
+
+        for room in sorted_rooms {
+            if (room.y - current_y).abs() > room_height {
+                if !current_row.is_empty() {
+                    organized_rooms.push(current_row);
+                    current_row = Vec::new();
+                }
+                current_y = room.y;
+            }
+            current_row.push(room);
+        }
+
+        if !current_row.is_empty() {
+            organized_rooms.push(current_row);
+        }
+
+        for row in &mut organized_rooms {
+            row.sort_by_key(|room| room.x);
+        }
+
+        self.rooms = organized_rooms;
+    }
+
+    fn generate_dungeon_with_stairs(&mut self) {
+        let mut rng = thread_rng();
+        let max_rooms = 15;
+        let min_room_size = 5;
+        let max_room_size = 10;
+
+        let mut temp_rooms = Vec::new();
+        self.tiles = vec![vec![Tile::Wall; self.width]; self.height];
+        self.rooms.clear();
+
+        for _ in 0..max_rooms {
+            let w = rng.gen_range(min_room_size..max_room_size);
+            let h = rng.gen_range(min_room_size..max_room_size);
+            let x = rng.gen_range(1..self.width as i32 - w - 1);
+            let y = rng.gen_range(1..self.height as i32 - h - 1);
+
+            let new_room = Room::new(x, y, w, h);
+
+            if !temp_rooms.iter().any(|r: &Room| r.intersects(&new_room)) {
+                self.create_room(&new_room);
+
+                if let Some(prev_room) = temp_rooms.last() {
+                    let (prev_x, prev_y) = prev_room.center();
+                    let (new_x, new_y) = new_room.center();
+
+                    if rng.gen_bool(0.5) {
+                        self.create_horizontal_tunnel(prev_x, new_x, prev_y);
+                        self.create_vertical_tunnel(prev_y, new_y, new_x);
+                    } else {
+                        self.create_vertical_tunnel(prev_y, new_y, prev_x);
+                        self.create_horizontal_tunnel(prev_x, new_x, new_y);
+                    }
+                }
+
+                temp_rooms.push(new_room);
+            }
+        }
+
+        self.rooms = vec![temp_rooms];
+
+        // Place stairs
+        if self.level > 0 {
+            if let Some((x, y)) = self.up_stairs {
+                self.tiles[y][x] = Tile::StairsUp;
+            }
+        }
+
+        if self.level < 9 {
+            if let Some(first_row) = self.rooms.first() {
+                if let Some(last_room) = first_row.last() {
+                    let (x, y) = last_room.center();
+                    let (x, y) = (x as usize, y as usize);
+                    self.tiles[y][x] = Tile::StairsDown;
+                    self.down_stairs = Some((x, y));
+                }
+            }
         }
     }
 
     fn place_stairs(&mut self) {
-        let mut rng = thread_rng();
-
-        // Place up stairs if this isn't the first level
         if self.level > 0 {
             if let Some((x, y)) = self.up_stairs {
-                let idx = y * self.width + x; // Calculate tile index for stairs
-                if idx < self.tiles.len() {
-                    self.tiles[idx] = Tile::StairsUp;
-                }
-            } else {
-                // Fallback: Place up stairs in the center of the first room
-                if let Some(room) = self.rooms.first() {
-                    let (x, y) = room.center();
-                    let idx = y as usize * self.width + x as usize;
-                    if idx < self.tiles.len() {
-                        self.tiles[idx] = Tile::StairsUp;
-                        self.up_stairs = Some((x as usize, y as usize));
+                self.tiles[y][x] = Tile::StairsUp;
+            } else if let Some(first_row) = self.rooms.first() {
+                if let Some(first_room) = first_row.first() {
+                    let (x, y) = first_room.center();
+                    let (x, y) = (x as usize, y as usize);
+                    if y < self.height && x < self.width {
+                        self.tiles[y][x] = Tile::StairsUp;
+                        self.up_stairs = Some((x, y));
                     }
                 }
             }
         }
 
-        // Place down stairs if this isn't the last level
         if self.level < 9 {
-            if let Some(room) = self.rooms.last() {
-                let (x, y) = room.center();
-                let idx = y as usize * self.width + x as usize;
-                if idx < self.tiles.len() {
-                    self.tiles[idx] = Tile::StairsDown;
-                    self.down_stairs = Some((x as usize, y as usize));
+            if let Some(last_row) = self.rooms.last() {
+                if let Some(last_room) = last_row.last() {
+                    let (x, y) = last_room.center();
+                    let (x, y) = (x as usize, y as usize);
+                    if y < self.height && x < self.width {
+                        self.tiles[y][x] = Tile::StairsDown;
+                        self.down_stairs = Some((x, y));
+                    }
                 }
             }
         }
@@ -544,10 +644,8 @@ impl Map {
         let min_room_size = 5;
         let max_room_size = 10;
 
-        // Initialize all tiles as walls
-        self.tiles = vec![Tile::Wall; self.width * self.height];
+        let mut temp_rooms = Vec::new();
 
-        // Generate rooms
         for _ in 0..max_rooms {
             let w = rng.gen_range(min_room_size..max_room_size);
             let h = rng.gen_range(min_room_size..max_room_size);
@@ -556,10 +654,10 @@ impl Map {
 
             let new_room = Room::new(x, y, w, h);
 
-            if !self.rooms.iter().any(|r| r.intersects(&new_room)) {
+            if !temp_rooms.iter().any(|r: &Room| r.intersects(&new_room)) {
                 self.create_room(&new_room);
 
-                if let Some(prev_room) = self.rooms.last() {
+                if let Some(prev_room) = temp_rooms.last() {
                     let (prev_x, prev_y) = prev_room.center();
                     let (new_x, new_y) = new_room.center();
 
@@ -572,37 +670,54 @@ impl Map {
                     }
                 }
 
-                self.rooms.push(new_room);
+                temp_rooms.push(new_room);
             }
         }
+
+        self.organize_rooms(temp_rooms);
     }
 
     fn create_room(&mut self, room: &Room) {
         for y in room.y..room.y + room.height {
+            let y_idx = y as usize;
+            if y_idx >= self.height {
+                continue;
+            }
             for x in room.x..room.x + room.width {
-                let idx = y as usize * self.width + x as usize;
-                if idx < self.tiles.len() {
-                    self.tiles[idx] = Tile::Floor;
+                let x_idx = x as usize;
+                if x_idx >= self.width {
+                    continue;
                 }
+                self.tiles[y_idx][x_idx] = Tile::Floor;
             }
         }
     }
 
     fn create_horizontal_tunnel(&mut self, x1: i32, x2: i32, y: i32) {
+        let y_idx = y as usize;
+        if y_idx >= self.height {
+            return;
+        }
         for x in x1.min(x2)..=x1.max(x2) {
-            let idx = y as usize * self.width + x as usize;
-            if idx < self.tiles.len() {
-                self.tiles[idx] = Tile::Floor;
+            let x_idx = x as usize;
+            if x_idx >= self.width {
+                continue;
             }
+            self.tiles[y_idx][x_idx] = Tile::Floor;
         }
     }
 
     fn create_vertical_tunnel(&mut self, y1: i32, y2: i32, x: i32) {
+        let x_idx = x as usize;
+        if x_idx >= self.width {
+            return;
+        }
         for y in y1.min(y2)..=y1.max(y2) {
-            let idx = y as usize * self.width + x as usize;
-            if idx < self.tiles.len() {
-                self.tiles[idx] = Tile::Floor;
+            let y_idx = y as usize;
+            if y_idx >= self.height {
+                continue;
             }
+            self.tiles[y_idx][x_idx] = Tile::Floor;
         }
     }
 
@@ -610,8 +725,7 @@ impl Map {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return false;
         }
-        let idx = y as usize * self.width + x as usize;
-        match self.tiles[idx] {
+        match self.tiles[y as usize][x as usize] {
             Tile::Floor | Tile::StairsUp | Tile::StairsDown => true,
             Tile::Wall => false,
         }
@@ -621,49 +735,52 @@ impl Map {
         if x >= self.width || y >= self.height {
             return true;
         }
-        self.tiles[y * self.width + x] == Tile::Wall
+        self.tiles[y][x] == Tile::Wall
     }
 
-    fn place_monsters(&self, rooms: &[Room]) -> (Option<(f32, f32)>, Vec<(f32, f32)>) {
+    fn place_monsters(&self) -> (Option<(f32, f32)>, Vec<(f32, f32)>) {
         let mut monster_positions = Vec::new();
         let mut rng = thread_rng();
         let mut used_positions = HashSet::new();
 
-        // Get player spawn position from first room
-        let player_spawn = rooms.first().and_then(|room| {
-            let center = room.center();
-            if self.is_walkable(center.0, center.1) {
-                used_positions.insert((center.0, center.1));
-                Some((center.0 as f32, center.1 as f32))
-            } else {
-                // Fallback: find any walkable tile in the first room
-                room.inner_tiles().into_iter()
-                    .find(|&(x, y)| self.is_walkable(x, y))
-                    .map(|(x, y)| {
-                        used_positions.insert((x, y));
-                        (x as f32, y as f32)
-                    })
-            }
-        });
+        // Get first room from first row
+        let player_spawn = self.rooms.get(0)
+            .and_then(|row| row.get(0))
+            .and_then(|room| {
+                let center = room.center();
+                if self.is_walkable(center.0, center.1) {
+                    used_positions.insert((center.0, center.1));
+                    Some((center.0 as f32, center.1 as f32))
+                } else {
+                    room.inner_tiles().into_iter()
+                        .find(|&(x, y)| self.is_walkable(x, y))
+                        .map(|(x, y)| {
+                            used_positions.insert((x, y));
+                            (x as f32, y as f32)
+                        })
+                }
+            });
 
-        // Skip the first room (player spawn) when placing monsters
-        for room in rooms.iter().skip(1) {
-            let num_monsters = rng.gen_range(1..4);
-            let walkable_tiles: Vec<_> = room.inner_tiles().into_iter()
-                .filter(|&(x, y)|
-                    self.is_walkable(x, y) &&
-                        !used_positions.contains(&(x, y))
-                )
-                .collect();
+        // Skip first room when placing monsters
+        for room_row in self.rooms.iter().skip(1) {
+            for room in room_row {
+                let num_monsters = rng.gen_range(1..4);
+                let walkable_tiles: Vec<_> = room.inner_tiles().into_iter()
+                    .filter(|&(x, y)|
+                        self.is_walkable(x, y) &&
+                            !used_positions.contains(&(x, y))
+                    )
+                    .collect();
 
-            if walkable_tiles.is_empty() {
-                continue;
-            }
+                if walkable_tiles.is_empty() {
+                    continue;
+                }
 
-            for _ in 0..num_monsters {
-                if let Some(&(x, y)) = walkable_tiles.choose(&mut rng) {
-                    if used_positions.insert((x, y)) {
-                        monster_positions.push((x as f32, y as f32));
+                for _ in 0..num_monsters {
+                    if let Some(&(x, y)) = walkable_tiles.choose(&mut rng) {
+                        if used_positions.insert((x, y)) {
+                            monster_positions.push((x as f32, y as f32));
+                        }
                     }
                 }
             }
@@ -681,10 +798,9 @@ impl Map {
 
         for y in start_y..end_y.min(self.height) {
             for x in start_x..end_x.min(self.width) {
-                let tile = &self.tiles[y * self.width + x];
+                let tile = &self.tiles[y][x];
                 let (screen_x, screen_y) = camera.world_to_screen(x as f32, y as f32);
 
-                // Choose color based on tile type
                 let (char, color) = match tile {
                     Tile::Wall => ('#', DARKGRAY),
                     Tile::Floor => ('.', GRAY),
@@ -765,18 +881,16 @@ impl GameState {
         let map_manager = MapManager::new(config);
         let mut game_state = Self {
             player: Entity::new_player(),
-            monsters: Vec::new(),           // Initialize empty monsters vector
+            monsters: Vec::new(),
             combat_log: Vec::new(),
             player_turn: true,
-            ground_items: Vec::new(),       // Initialize empty ground items vector
+            ground_items: Vec::new(),
             inventory_open: false,
             map_manager,
             level_states: vec![],
         };
 
-        // Initialize first level
         game_state.initialize_current_level();
-
         game_state
     }
 
@@ -818,124 +932,73 @@ impl GameState {
     }
 
     fn initialize_current_level(&mut self) {
-        let current_level = self.map_manager.current_level as usize;
-        let rooms = self.map_manager.current_map().rooms.clone();
-
-        // Ensure player spawns in a valid position in the first room
-        if let Some(first_room) = rooms.first() {
-            let (center_x, center_y) = first_room.center();
-            self.player.x = center_x as f32;
-            self.player.y = center_y as f32;
+        if let Some(first_row) = self.map_manager.current_map().rooms.first() {
+            if let Some(first_room) = first_row.first() {
+                let (center_x, center_y) = first_room.center();
+                self.player.x = center_x as f32;
+                self.player.y = center_y as f32;
+            }
         }
 
-        // Generate new monsters and items
         let mut rng = thread_rng();
         let mut new_monsters = Vec::new();
         let map = self.map_manager.current_map();
 
-        // Skip the first room when placing monsters
-        for room in rooms.iter().skip(1) {
-            let num_monsters = rng.gen_range(0..3);
-            for _ in 0..num_monsters {
-                let (x, y) = room.random_position(&mut rng);
-                if map.is_walkable(x as i32, y as i32) {
-                    // Check for collisions with existing monsters
-                    let position_clear = !new_monsters.iter()
-                        .any(|m: &Entity| m.x == x as f32 && m.y == y as f32);
-
-                    if position_clear {
+        for row in &map.rooms {
+            for room in row.iter().skip(1) {
+                let num_monsters = rng.gen_range(0..3);
+                for _ in 0..num_monsters {
+                    let (x, y) = room.random_position(&mut rng);
+                    if map.is_walkable(x, y) {
                         new_monsters.push(Entity::new_monster(x as f32, y as f32));
                     }
                 }
             }
         }
 
-        // Generate items
-        let mut new_ground_items = Vec::new();
-        for room in &rooms {
-            if rng.gen_bool(0.6) {  // 60% chance for item in room
-                let mut valid_position = false;
-                let mut tries = 0;
-                while !valid_position && tries < 10 {
-                    let (x, y) = room.random_position(&mut rng);
-                    if map.is_walkable(x as i32, y as i32) {
-                        let item = match rng.gen_range(0..4) {
-                            0 => Item::new_sword(),
-                            1 => Item::new_armor(),
-                            2 => Item::new_health_potion(),
-                            _ => Item::new_lightning_scroll(),
-                        };
-                        new_ground_items.push((x as f32, y as f32, item));
-                        valid_position = true;
-                    }
-                    tries += 1;
-                }
-            }
-        }
-
-        // Create and store new level state
-        let new_state = LevelState {
-            monsters: new_monsters.clone(),
-            ground_items: new_ground_items.clone(),
-        };
-
-        // Ensure we have space for this level
-        while self.level_states.len() <= current_level {
-            self.level_states.push(LevelState {
-                monsters: Vec::new(),
-                ground_items: Vec::new(),
-            });
-        }
-
-        // Save the state and update current state
-        self.level_states[current_level] = new_state;
         self.monsters = new_monsters;
-        self.ground_items = new_ground_items;
+        self.spawn_items_for_current_level();
     }
 
     fn spawn_items_for_current_level(&mut self) {
         let mut rng = thread_rng();
         self.ground_items.clear();
 
-        // Clone the rooms to avoid borrowing issues
         let rooms = self.map_manager.current_map().rooms.clone();
 
-        for room in &rooms {
-            // 60% chance to spawn an item in each room
-            if rng.gen_bool(0.6) {
-                let (x, y) = room.random_position(&mut rng);
-                let item = match rng.gen_range(0..4) {
-                    0 => Item::new_sword(),
-                    1 => Item::new_armor(),
-                    2 => Item::new_health_potion(),
-                    _ => Item::new_lightning_scroll(),
-                };
-                self.ground_items.push((x as f32, y as f32, item));
+        for row in &rooms {
+            for room in row {
+                if rng.gen_bool(0.6) {
+                    let (x, y) = room.random_position(&mut rng);
+                    let item = match rng.gen_range(0..4) {
+                        0 => Item::new_sword(),
+                        1 => Item::new_armor(),
+                        2 => Item::new_health_potion(),
+                        _ => Item::new_lightning_scroll(),
+                    };
+                    self.ground_items.push((x as f32, y as f32, item));
+                }
             }
         }
     }
 
     fn handle_level_transition(&mut self) {
-        let player_pos = (self.player.x, self.player.y);
+        let player_pos = (self.player.x as usize, self.player.y as usize);
         let current_level = self.map_manager.current_level;
         let map = self.map_manager.current_map();
-        let idx = player_pos.1 as usize * map.width + player_pos.0 as usize;
 
-        if idx >= map.tiles.len() {
+        if player_pos.1 >= map.height || player_pos.0 >= map.width {
             return;
         }
 
-        match map.tiles[idx] {
+        match map.tiles[player_pos.1][player_pos.0] {
             Tile::StairsDown => {
                 if is_key_pressed(KeyCode::Period) {
-                    // Save current level state
                     self.save_current_level_state();
-
                     let next_level = current_level + 1;
                     let is_new_level = next_level as usize >= self.level_states.len();
 
                     if let Some((new_x, new_y)) = self.map_manager.change_level(next_level) {
-                        // Player should appear on up stairs
                         self.player.x = new_x;
                         self.player.y = new_y;
 
@@ -951,15 +1014,11 @@ impl GameState {
             },
             Tile::StairsUp => {
                 if is_key_pressed(KeyCode::Comma) {
-                    // Save current level state
                     self.save_current_level_state();
-
                     let prev_level = current_level - 1;
                     if let Some((new_x, new_y)) = self.map_manager.change_level(prev_level) {
-                        // Player should appear on down stairs
                         self.player.x = new_x;
                         self.player.y = new_y;
-
                         self.load_level_state(prev_level as usize);
                         self.add_log_message(format!("Ascended to level {}", prev_level + 1));
                     }
@@ -970,49 +1029,51 @@ impl GameState {
     }
 
     fn spawn_entities(&mut self, map: &Map) {
-        // Always spawn player in the first room
-        if let Some(first_room) = map.rooms.first() {
-            let (center_x, center_y) = first_room.center();
-            self.player.x = center_x as f32;
-            self.player.y = center_y as f32;
-        } else {
-            // Fallback: scan for any walkable tile
-            for y in 0..map.height {
-                for x in 0..map.width {
-                    if map.is_walkable(x as i32, y as i32) {
-                        self.player.x = x as f32;
-                        self.player.y = y as f32;
-                        break;
+        // Spawn player in first room of first row
+        if let Some(first_row) = map.rooms.first() {
+            if let Some(first_room) = first_row.first() {
+                let (center_x, center_y) = first_room.center();
+                self.player.x = center_x as f32;
+                self.player.y = center_y as f32;
+            } else {
+                // Fallback: scan for walkable tile
+                for y in 0..map.height {
+                    for x in 0..map.width {
+                        if map.is_walkable(x as i32, y as i32) {
+                            self.player.x = x as f32;
+                            self.player.y = y as f32;
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        // Spawn monsters (avoiding the first room where player spawns)
         self.monsters.clear();
         let rooms = map.rooms.clone();
         let mut rng = thread_rng();
 
-        // Skip the first room when spawning monsters
-        for room in rooms.iter().skip(1) {
-            let num_monsters = rng.gen_range(0..3);  // 0 to 2 monsters per room
-            for _ in 0..num_monsters {
-                let mut tries = 0;
-                let max_tries = 10;
+        // Skip first row for monster spawning
+        for row in rooms.iter().skip(1) {
+            for room in row.iter() { // Changed from row to row.iter()
+                let num_monsters = rng.gen_range(0..3);
+                for _ in 0..num_monsters {
+                    let mut tries = 0;
+                    let max_tries = 10;
 
-                while tries < max_tries {
-                    let (x, y) = room.random_position(&mut rng);
-                    if map.is_walkable(x, y) {
-                        // Check if position is already occupied
-                        let is_occupied = self.monsters.iter()
-                            .any(|m| m.x == x as f32 && m.y == y as f32);
+                    while tries < max_tries {
+                        let (x, y) = room.random_position(&mut rng);
+                        if map.is_walkable(x, y) {
+                            let is_occupied = self.monsters.iter()
+                                .any(|m| m.x == x as f32 && m.y == y as f32);
 
-                        if !is_occupied {
-                            self.monsters.push(Entity::new_monster(x as f32, y as f32));
-                            break;
+                            if !is_occupied {
+                                self.monsters.push(Entity::new_monster(x as f32, y as f32));
+                                break;
+                            }
                         }
+                        tries += 1;
                     }
-                    tries += 1;
                 }
             }
         }
@@ -1209,17 +1270,18 @@ impl GameState {
     fn spawn_items(&mut self, map: &Map) {
         let mut rng = thread_rng();
 
-        for room in &map.rooms {
-            // 60% chance to spawn an item in each room
-            if rng.gen_bool(0.6) {
-                let (x, y) = room.random_position(&mut rng);
-                let item = match rng.gen_range(0..4) {
-                    0 => Item::new_sword(),
-                    1 => Item::new_armor(),
-                    2 => Item::new_health_potion(),
-                    _ => Item::new_lightning_scroll(),
-                };
-                self.ground_items.push((x as f32, y as f32, item));
+        for room_row in &map.rooms {
+            for room in room_row {
+                if rng.gen_bool(0.6) {
+                    let (x, y) = room.random_position(&mut rng);
+                    let item = match rng.gen_range(0..4) {
+                        0 => Item::new_sword(),
+                        1 => Item::new_armor(),
+                        2 => Item::new_health_potion(),
+                        _ => Item::new_lightning_scroll(),
+                    };
+                    self.ground_items.push((x as f32, y as f32, item));
+                }
             }
         }
     }
