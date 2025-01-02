@@ -265,6 +265,32 @@ struct Stats {
     defense: i32,
     speed: f32,
     last_move: f32,
+    perception: f32,
+}
+
+// A* Node structure for pathfinding
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct Node {
+    position: (i32, i32),
+    g_cost: i32,
+    f_cost: i32,
+    parent: Option<(i32, i32)>,
+}
+
+impl Ord for Node {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.f_cost.cmp(&self.f_cost)  // Reverse for min-heap
+    }
+}
+
+impl PartialOrd for Node {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn manhattan_distance(a: (i32, i32), b: (i32, i32)) -> i32 {
+    (a.0 - b.0).abs() + (a.1 - b.1).abs()
 }
 
 #[derive(Clone)]
@@ -292,6 +318,7 @@ impl Entity {
                 defense: 2,
                 speed: 10.0,
                 last_move: 0.0,
+                perception: 8.0,
             },
             is_player: true,
             inventory: Some(Inventory::new(20))
@@ -311,10 +338,19 @@ impl Entity {
                 defense: 1,
                 speed: 2.0,
                 last_move: 0.0,
+                perception: 8.0,
             },
             is_player: false,
             inventory: None,
         }
+    }
+
+    // Add method to check if target is within perception range
+    fn can_perceive_target(&self, target_x: f32, target_y: f32) -> bool {
+        let dx = target_x - self.x;
+        let dy = target_y - self.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        distance <= self.stats.perception
     }
 
     fn attack(&mut self, target: &mut Entity) -> String {
@@ -789,6 +825,80 @@ impl Map {
         (player_spawn, monster_positions)
     }
 
+    fn find_path(&self, start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(i32, i32)>> {
+        use std::collections::{BinaryHeap, HashSet};
+
+        let mut open_set = BinaryHeap::new();
+        let mut closed_set: HashSet<Node> = HashSet::new();
+
+        // Initialize start node
+        let start_node = Node {
+            position: start,
+            g_cost: 0,
+            f_cost: manhattan_distance(start, goal),
+            parent: None,
+        };
+
+        open_set.push(start_node);
+
+        while let Some(current) = open_set.pop() {
+            if current.position == goal {
+                // Reconstruct path
+                let mut path = Vec::new();
+                let mut current_pos = current.position;
+                let mut current_node = Some(current);
+
+                while let Some(node) = current_node {
+                    path.push(node.position);
+                    if let Some(parent_pos) = node.parent {
+                        current_pos = parent_pos;
+                        current_node = closed_set.iter()
+                            .find(|n| n.position == parent_pos)
+                            .cloned();
+                    } else {
+                        break;
+                    }
+                }
+
+                path.reverse();
+                return Some(path);
+            }
+
+            closed_set.insert(current.clone());
+
+            // Check neighbors
+            for &(dx, dy) in &[(0, 1), (1, 0), (0, -1), (-1, 0)] {
+                let next_pos = (
+                    current.position.0 + dx,
+                    current.position.1 + dy
+                );
+
+                if !self.is_walkable(next_pos.0, next_pos.1) {
+                    continue;
+                }
+
+                if closed_set.iter().any(|n| n.position == next_pos) {
+                    continue;
+                }
+
+                let g_cost = current.g_cost + 1;
+                let h_cost = manhattan_distance(next_pos, goal);
+                let f_cost = g_cost + h_cost;
+
+                let next_node = Node {
+                    position: next_pos,
+                    g_cost,
+                    f_cost,
+                    parent: Some(current.position),
+                };
+
+                open_set.push(next_node);
+            }
+        }
+
+        None
+    }
+
     // Update the draw method to use different colors for different tiles
     fn draw(&self, camera: &Camera) {
         let start_x = camera.x.floor() as usize;
@@ -1202,6 +1312,7 @@ impl GameState {
 
     fn process_monster_turns(&mut self, current_time: f32) {
         let player_pos = (self.player.x, self.player.y);
+        let map = self.map_manager.current_map();
 
         let monster_positions: Vec<(f32, f32)> = self.monsters.iter()
             .filter(|m| m.is_alive())
@@ -1214,52 +1325,50 @@ impl GameState {
             }
 
             let monster = &mut self.monsters[i];
-            let dx = player_pos.0 - monster.x;
-            let dy = player_pos.1 - monster.y;
-            let distance = (dx * dx + dy * dy).sqrt();
+            let monster_pos = (monster.x as i32, monster.y as i32);
+            let player_grid_pos = (player_pos.0 as i32, player_pos.1 as i32);
 
-            let mut new_x = monster.x;
-            let mut new_y = monster.y;
+            let mut new_pos = monster_pos;
 
-            if distance <= 5.0 {
-                // Move towards player if nearby
-                new_x += dx.signum();
-                new_y += dy.signum();
-            } else {
-                // Random movement
-                let direction = rand::gen_range(0, 4);
-                match direction {
-                    0 => new_x += 1.0,
-                    1 => new_x -= 1.0,
-                    2 => new_y += 1.0,
-                    _ => new_y -= 1.0,
-                }
-            }
-
-            // Check for collision with walls
-            let is_walkable = self.map_manager.current_map().is_walkable(new_x as i32, new_y as i32);
-
-            if is_walkable {
-                let mut can_move = true;
-
-                // Check collision with other monsters
-                for (pos_x, pos_y) in &monster_positions {
-                    if *pos_x == new_x && *pos_y == new_y && (*pos_x != monster.x || *pos_y != monster.y) {
-                        can_move = false;
-                        break;
+            if monster.can_perceive_target(player_pos.0, player_pos.1) {
+                // Use A* pathfinding when player is within perception range
+                if let Some(path) = map.find_path(monster_pos, player_grid_pos) {
+                    if path.len() > 1 {  // Check if we have a next step
+                        new_pos = path[1];  // Get the next position in the path
                     }
                 }
+            } else {
+                // Random movement when player is not perceived
+                let mut rng = thread_rng();
+                let direction = rng.gen_range(0..4);
+                new_pos = match direction {
+                    0 => (monster_pos.0 + 1, monster_pos.1),
+                    1 => (monster_pos.0 - 1, monster_pos.1),
+                    2 => (monster_pos.0, monster_pos.1 + 1),
+                    _ => (monster_pos.0, monster_pos.1 - 1),
+                };
+            }
 
-                // Check collision with player
-                if self.player.x == new_x && self.player.y == new_y {
+            // Check if the new position is valid
+            if map.is_walkable(new_pos.0, new_pos.1) {
+                let new_pos_f = (new_pos.0 as f32, new_pos.1 as f32);
+
+                // Check for collisions with other monsters
+                let is_collision = monster_positions.iter()
+                    .any(|&pos| pos.0 == new_pos_f.0 && pos.1 == new_pos_f.1);
+
+                // Check for collision with player
+                if player_pos.0 == new_pos_f.0 && player_pos.1 == new_pos_f.1 {
                     let message = monster.attack(&mut self.player);
+                    if monster.is_alive() { // Only update if we haven't processed this monster in combat
+                        monster.update_last_move(current_time);
+                    }
+                    drop(monster); // Release the monster borrow before modifying self
                     //self.add_log_message(message);
-                    can_move = false;
-                }
-
-                if can_move {
-                    monster.x = new_x;
-                    monster.y = new_y;
+                    continue;
+                } else if !is_collision {
+                    monster.x = new_pos_f.0;
+                    monster.y = new_pos_f.1;
                 }
             }
 
