@@ -4,6 +4,38 @@ use std::collections::HashSet;
 
 const TILE_SIZE: f32 = 20.0;
 
+#[derive(Clone)]
+struct LevelSystem {
+    level: i32,
+    current_xp: i32,
+    xp_to_next_level: i32,
+}
+
+impl LevelSystem {
+    fn new() -> Self {
+        Self {
+            level: 1,
+            current_xp: 0,
+            xp_to_next_level: 100, // Base XP needed for level 2
+        }
+    }
+
+    fn add_xp(&mut self, xp: i32) -> bool {
+        self.current_xp += xp;
+        if self.current_xp >= self.xp_to_next_level {
+            self.level_up();
+            return true;
+        }
+        false
+    }
+
+    fn level_up(&mut self) {
+        self.level += 1;
+        self.current_xp -= self.xp_to_next_level;
+        // Increase XP needed for next level by 50%
+        self.xp_to_next_level = (self.xp_to_next_level as f32 * 1.5) as i32;
+    }
+}
 // Add this new enum to represent different tile types
 #[derive(Clone, PartialEq)]
 enum Tile {
@@ -266,6 +298,7 @@ struct Stats {
     speed: f32,
     last_move: f32,
     perception: f32,
+    level_system: Option<LevelSystem>,
 }
 
 // A* Node structure for pathfinding
@@ -319,6 +352,7 @@ impl Entity {
                 speed: 10.0,
                 last_move: 0.0,
                 perception: 8.0,
+                level_system: Some(LevelSystem::new()),
             },
             is_player: true,
             inventory: Some(Inventory::new(20))
@@ -329,7 +363,7 @@ impl Entity {
         Self {
             x,
             y,
-            symbol: 'g', // goblin
+            symbol: 'g',
             color: RED,
             stats: Stats {
                 hp: 15,
@@ -339,6 +373,7 @@ impl Entity {
                 speed: 2.0,
                 last_move: 0.0,
                 perception: 8.0,
+                level_system: None, // Monsters don't level up
             },
             is_player: false,
             inventory: None,
@@ -353,15 +388,40 @@ impl Entity {
         distance <= self.stats.perception
     }
 
-    fn attack(&mut self, target: &mut Entity) -> String {
+    fn attack(&mut self, target: &mut Entity) -> Vec<String> {
         let damage = (self.stats.attack - target.stats.defense).max(1);
         target.stats.hp -= damage;
+        let mut messages = vec![format!("{} hits {} for {} damage!",
+                                        if self.is_player { "Player" } else { "Monster" },
+                                        if target.is_player { "Player" } else { "Monster" },
+                                        damage
+        )];
 
-        format!("{} hits {} for {} damage!",
-                if self.is_player { "Player" } else { "Monster" },
-                if target.is_player { "Player" } else { "Monster" },
-                damage
-        )
+        // If player kills a monster, grant XP
+        if self.is_player && !target.is_alive() {
+            if let Some(ref mut level_system) = self.stats.level_system.as_mut() {
+                let xp_gained = 50; // Base XP for killing a monster
+                messages.push(format!("Gained {} XP!", xp_gained));
+
+                // Store the current level before modification
+                let current_level = level_system.level;
+                if level_system.add_xp(xp_gained) {
+                    self.level_up();
+                    messages.push(format!("Level Up! You are now level {}!", current_level + 1));
+                }
+            }
+        }
+
+        messages
+    }
+
+    fn level_up(&mut self) {
+        // Increase stats on level up
+        self.stats.max_hp += 5;
+        self.stats.hp = self.stats.max_hp; // Heal to full on level up
+        self.stats.attack += 2;
+        self.stats.defense += 1;
+        self.stats.perception += 0.5;
     }
 
     fn is_alive(&self) -> bool {
@@ -1489,8 +1549,10 @@ async fn main() {
                 // Check for combat
                 for monster in &mut game_state.monsters {
                     if monster.is_alive() && new_x == monster.x && new_y == monster.y {
-                        let message = game_state.player.attack(monster);
-                        game_state.add_log_message(message);
+                        let messages = game_state.player.attack(monster);
+                        for message in messages {
+                            game_state.add_log_message(message);
+                        }
                         combat_occurred = true;
                         break;
                     }
@@ -1571,6 +1633,7 @@ async fn main() {
 
         // Draw UI
         draw_rectangle(0.0, 0.0, screen_width(), 30.0, Color::new(0.0, 0.0, 0.0, 0.8));
+
         draw_text(
             &format!("HP: {}/{} ATK: {} DEF: {} Level: {}",
                      game_state.player.stats.hp,
@@ -1578,6 +1641,23 @@ async fn main() {
                      game_state.player.stats.attack,
                      game_state.player.stats.defense,
                      game_state.map_manager.current_level + 1  // Add current level to UI
+            ),
+            10.0,
+            20.0,
+            15.0,
+            GREEN,
+        );
+
+        draw_text(
+            &format!("HP: {}/{} ATK: {} DEF: {} Floor: {} Level: {} XP: {}/{}",
+                     game_state.player.stats.hp,
+                     game_state.player.stats.max_hp,
+                     game_state.player.stats.attack,
+                     game_state.player.stats.defense,
+                     game_state.map_manager.current_level + 1,
+                     game_state.player.stats.level_system.as_ref().map_or(1, |ls| ls.level),
+                     game_state.player.stats.level_system.as_ref().map_or(0, |ls| ls.current_xp),
+                     game_state.player.stats.level_system.as_ref().map_or(100, |ls| ls.xp_to_next_level)
             ),
             10.0,
             20.0,
