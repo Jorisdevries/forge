@@ -1513,8 +1513,12 @@ async fn main() {
     let config = GameConfig::default();
     let mut game_state = GameState::new(config);
 
+    // Constants for UI layout
+    const TOP_BAR_HEIGHT: f32 = 50.0;
+    const BOTTOM_BAR_HEIGHT: f32 = 120.0;
+
     let viewport_width = (screen_width() / TILE_SIZE).floor() as usize;
-    let viewport_height = (screen_height() / TILE_SIZE).floor() as usize;
+    let viewport_height = ((screen_height() - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) / TILE_SIZE).floor() as usize;
     let mut camera = Camera::new(viewport_width, viewport_height);
 
     loop {
@@ -1631,54 +1635,65 @@ async fn main() {
             );
         }
 
-        // Draw UI
-        draw_rectangle(0.0, 0.0, screen_width(), 30.0, Color::new(0.0, 0.0, 0.0, 0.8));
+        // Constants for UI text
+        const LOG_PADDING: f32 = 10.0;
+        const TEXT_SIZE: f32 = 15.0;
 
-        draw_text(
-            &format!("HP: {}/{} ATK: {} DEF: {} Level: {}",
-                     game_state.player.stats.hp,
-                     game_state.player.stats.max_hp,
-                     game_state.player.stats.attack,
-                     game_state.player.stats.defense,
-                     game_state.map_manager.current_level + 1  // Add current level to UI
-            ),
-            10.0,
-            20.0,
-            15.0,
-            GREEN,
+        // Draw top stats bar background
+        draw_rectangle(
+            0.0,
+            0.0,
+            screen_width(),
+            TOP_BAR_HEIGHT,
+            Color::new(0.0, 0.0, 0.0, 0.8)
         );
 
-        draw_text(
-            &format!("HP: {}/{} ATK: {} DEF: {} Floor: {} Level: {} XP: {}/{}",
-                     game_state.player.stats.hp,
-                     game_state.player.stats.max_hp,
-                     game_state.player.stats.attack,
-                     game_state.player.stats.defense,
-                     game_state.map_manager.current_level + 1,
-                     game_state.player.stats.level_system.as_ref().map_or(1, |ls| ls.level),
-                     game_state.player.stats.level_system.as_ref().map_or(0, |ls| ls.current_xp),
-                     game_state.player.stats.level_system.as_ref().map_or(100, |ls| ls.xp_to_next_level)
-            ),
-            10.0,
-            20.0,
-            15.0,
-            GREEN,
+        // Draw top stats bar content
+        let hp_text = format!("HP: {}/{}", game_state.player.stats.hp, game_state.player.stats.max_hp);
+        let stats_text = format!("ATK: {} DEF: {}",
+                                 game_state.player.stats.attack,
+                                 game_state.player.stats.defense
+        );
+        let floor_text = format!("Floor: {}", game_state.map_manager.current_level + 1);
+        let xp_text = format!("Level: {} XP: {}/{}",
+                              game_state.player.stats.level_system.as_ref().map_or(1, |ls| ls.level),
+                              game_state.player.stats.level_system.as_ref().map_or(0, |ls| ls.current_xp),
+                              game_state.player.stats.level_system.as_ref().map_or(100, |ls| ls.xp_to_next_level)
         );
 
-        // Draw combat log
+        // Position text with proper spacing
+        draw_text(&hp_text, 10.0, TOP_BAR_HEIGHT/2.0 + TEXT_SIZE/2.0, TEXT_SIZE, GREEN);
+        draw_text(&stats_text, screen_width()/4.0, TOP_BAR_HEIGHT/2.0 + TEXT_SIZE/2.0, TEXT_SIZE, GREEN);
+        draw_text(&floor_text, screen_width()/2.0, TOP_BAR_HEIGHT/2.0 + TEXT_SIZE/2.0, TEXT_SIZE, YELLOW);
+        draw_text(&xp_text, 2.0*screen_width()/3.0, TOP_BAR_HEIGHT/2.0 + TEXT_SIZE/2.0, TEXT_SIZE, GREEN);
+
+        // Draw bottom combat log background
+        draw_rectangle(
+            0.0,
+            screen_height() - BOTTOM_BAR_HEIGHT,
+            screen_width(),
+            BOTTOM_BAR_HEIGHT,
+            Color::new(0.0, 0.0, 0.0, 0.8)
+        );
+
+        // Draw combat log title
+        draw_text(
+            "Combat Log",
+            LOG_PADDING,
+            screen_height() - BOTTOM_BAR_HEIGHT + 20.0,
+            TEXT_SIZE,
+            GRAY,
+        );
+
+        // Draw combat log messages
         for (i, message) in game_state.combat_log.iter().enumerate() {
             draw_text(
                 message,
-                10.0,
-                screen_height() - 20.0 * (game_state.combat_log.len() - i) as f32,
-                15.0,
-                GRAY,
+                LOG_PADDING,
+                screen_height() - BOTTOM_BAR_HEIGHT + 40.0 + (i as f32 * 20.0),
+                TEXT_SIZE,
+                WHITE,
             );
-        }
-
-        // Toggle inventory with 'I' key
-        if is_key_pressed(KeyCode::I) {
-            game_state.inventory_open = !game_state.inventory_open;
         }
 
         // If inventory is open, draw it
