@@ -1,8 +1,29 @@
 use macroquad::prelude::*;
+use macroquad::window::Conf;
 use ::rand::prelude::*;
 use std::collections::HashSet;
 
-const TILE_SIZE: f32 = 20.0;
+const TOP_BAR_HEIGHT: f32 = 50.0;
+const BOTTOM_BAR_HEIGHT: f32 = 120.0;
+
+const DESIRED_TILE_SIZE: f32 = 20.0;
+
+fn calculate_tile_size(map_width: usize, map_height: usize, screen_width: f32, screen_height: f32) -> f32 {
+    let available_width = screen_width;
+    let available_height = screen_height - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT;
+
+    // Calculate how many tiles we can fit while maintaining the desired size
+    let width_tiles = (available_width / DESIRED_TILE_SIZE).floor();
+    let height_tiles = (available_height / DESIRED_TILE_SIZE).floor();
+
+    // Calculate the actual tile size that will use all available space
+    let width_based_size = available_width / width_tiles.min(map_width as f32);
+    let height_based_size = available_height / height_tiles.min(map_height as f32);
+
+    // Use the smaller of the two sizes to ensure tiles are square and fit in both dimensions
+    width_based_size.min(height_based_size)
+}
+
 
 #[derive(Clone)]
 struct LevelSystem {
@@ -475,20 +496,25 @@ impl Camera {
         }
     }
 
+
     fn follow(&mut self, target_x: f32, target_y: f32, map_width: usize, map_height: usize) {
         // Center the camera on the target
         self.x = target_x - self.viewport_width as f32 / 2.0;
         self.y = target_y - self.viewport_height as f32 / 2.0;
 
+        // Calculate the maximum camera positions
+        let max_x = (map_width as f32).max(self.viewport_width as f32) - self.viewport_width as f32;
+        let max_y = (map_height as f32).max(self.viewport_height as f32) - self.viewport_height as f32;
+
         // Clamp camera position to map bounds
-        self.x = self.x.clamp(0.0, (map_width as f32) - self.viewport_width as f32);
-        self.y = self.y.clamp(0.0, (map_height as f32) - self.viewport_height as f32);
+        self.x = self.x.clamp(0.0, max_x.max(0.0));
+        self.y = self.y.clamp(0.0, max_y.max(0.0));
     }
 
-    fn world_to_screen(&self, world_x: f32, world_y: f32) -> (f32, f32) {
+    fn world_to_screen(&self, world_x: f32, world_y: f32, tile_size: f32) -> (f32, f32) {
         (
-            (world_x - self.x) * TILE_SIZE,
-            (world_y - self.y) * TILE_SIZE,
+            (world_x - self.x) * tile_size,
+            (world_y - self.y) * tile_size + TOP_BAR_HEIGHT
         )
     }
 
@@ -960,7 +986,7 @@ impl Map {
     }
 
     // Update the draw method to use different colors for different tiles
-    fn draw(&self, camera: &Camera) {
+    fn draw(&self, camera: &Camera, tile_size: f32) {
         let start_x = camera.x.floor() as usize;
         let start_y = camera.y.floor() as usize;
         let end_x = (camera.x + camera.viewport_width as f32).ceil() as usize;
@@ -969,7 +995,7 @@ impl Map {
         for y in start_y..end_y.min(self.height) {
             for x in start_x..end_x.min(self.width) {
                 let tile = &self.tiles[y][x];
-                let (screen_x, screen_y) = camera.world_to_screen(x as f32, y as f32);
+                let (screen_x, screen_y) = camera.world_to_screen(x as f32, y as f32, tile_size);
 
                 let (char, color) = match tile {
                     Tile::Wall => ('#', DARKGRAY),
@@ -981,8 +1007,8 @@ impl Map {
                 draw_text(
                     &char.to_string(),
                     screen_x,
-                    screen_y + TILE_SIZE,
-                    TILE_SIZE,
+                    screen_y + tile_size,
+                    tile_size,
                     color,
                 );
             }
@@ -1508,17 +1534,31 @@ impl Default for GameConfig {
     }
 }
 
-#[macroquad::main("Roguelike")]
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Roguelike".to_string(),
+        window_width: 1280,
+        window_height: 720,
+        ..Default::default()
+    }
+}
+
+#[macroquad::main(window_conf)]
 async fn main() {
     let config = GameConfig::default();
+    let map_width = config.map_width;    // Store the values we need
+    let map_height = config.map_height;  // before moving config
     let mut game_state = GameState::new(config);
 
-    // Constants for UI layout
-    const TOP_BAR_HEIGHT: f32 = 50.0;
-    const BOTTOM_BAR_HEIGHT: f32 = 120.0;
+    let tile_size = calculate_tile_size(
+        map_width,          // Now using the stored values
+        map_height,
+        screen_width(),
+        screen_height()
+    );
 
-    let viewport_width = (screen_width() / TILE_SIZE).floor() as usize;
-    let viewport_height = ((screen_height() - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) / TILE_SIZE).floor() as usize;
+    let viewport_width = (screen_width() / tile_size).floor() as usize;
+    let viewport_height = ((screen_height() - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT) / tile_size).floor() as usize;
     let mut camera = Camera::new(viewport_width, viewport_height);
 
     loop {
@@ -1593,17 +1633,17 @@ async fn main() {
         clear_background(BLACK);
 
         // Draw the current map
-        game_state.map_manager.current_map().draw(&camera);
+        game_state.map_manager.current_map().draw(&camera, tile_size);
 
         // Draw monsters
         for monster in &game_state.monsters {
             if monster.is_alive() && camera.is_visible(monster.x, monster.y) {
-                let (screen_x, screen_y) = camera.world_to_screen(monster.x, monster.y);
+                let (screen_x, screen_y) = camera.world_to_screen(monster.x, monster.y, tile_size);
                 draw_text(
                     &monster.symbol.to_string(),
                     screen_x,
-                    screen_y + TILE_SIZE,
-                    TILE_SIZE,
+                    screen_y + tile_size,
+                    tile_size,
                     monster.color,
                 );
             }
@@ -1612,12 +1652,12 @@ async fn main() {
         // Draw items on ground
         for (x, y, item) in &game_state.ground_items {
             if camera.is_visible(*x, *y) {
-                let (screen_x, screen_y) = camera.world_to_screen(*x, *y);
+                let (screen_x, screen_y) = camera.world_to_screen(*x, *y, tile_size);
                 draw_text(
                     &item.symbol.to_string(),
                     screen_x,
-                    screen_y + TILE_SIZE,
-                    TILE_SIZE,
+                    screen_y + tile_size,
+                    tile_size,
                     item.color,
                 );
             }
@@ -1625,12 +1665,12 @@ async fn main() {
 
         // Draw the player
         if camera.is_visible(game_state.player.x, game_state.player.y) {
-            let (screen_x, screen_y) = camera.world_to_screen(game_state.player.x, game_state.player.y);
+            let (screen_x, screen_y) = camera.world_to_screen(game_state.player.x, game_state.player.y, tile_size);
             draw_text(
                 &game_state.player.symbol.to_string(),
                 screen_x,
-                screen_y + TILE_SIZE,
-                TILE_SIZE,
+                screen_y + tile_size,
+                tile_size,
                 game_state.player.color,
             );
         }
